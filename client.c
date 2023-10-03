@@ -3,12 +3,21 @@
 #include <libwebsockets.h>
 #include <pthread.h>
 #include <stdlib.h>
-#include <unistd.h>  // for sleep on Unix-like systems
+#include <unistd.h>
 
-static struct lws *global_wsi = NULL;
-static struct lws_client_connect_info connect_info;
+static pthread_mutex_t queue_lock = PTHREAD_MUTEX_INITIALIZER;
 
-// Basic linked list structure for message queue
+typedef struct {
+    char *address;
+    int port;
+    struct lws *wsi;
+    struct lws_client_connect_info connect_info;
+    void (*data_received_callback)(const char*);
+} WebSocketClient;
+
+void send_to_ws(WebSocketClient *client, const char *message);
+
+// Linked list structure for message queue
 typedef struct node {
     char *message;
     struct node *next;
@@ -17,17 +26,13 @@ typedef struct node {
 static node_t *head = NULL;
 static node_t *tail = NULL;
 
-static pthread_mutex_t queue_lock = PTHREAD_MUTEX_INITIALIZER;
-
 void enqueue(const char *message) {
     node_t *new_node = malloc(sizeof(node_t));
     if (new_node) {
         new_node->message = strdup(message);
         new_node->next = NULL;
-
-        if (tail == NULL) {
-            head = new_node;
-            tail = new_node;
+        if (!tail) {
+            head = tail = new_node;
         } else {
             tail->next = new_node;
             tail = new_node;
@@ -36,45 +41,31 @@ void enqueue(const char *message) {
 }
 
 char *dequeue() {
-    if (head == NULL) {
-        return NULL;
-    }
+    if (!head) return NULL;
     node_t *old_head = head;
     char *message = old_head->message;
     head = head->next;
-    if (head == NULL) {
-        tail = NULL;
-    }
+    if (!head) tail = NULL;
     free(old_head);
     return message;
 }
-
-void send_to_ws(const char *message) {
-    pthread_mutex_lock(&queue_lock);
-    
-    enqueue(message);
-    if (global_wsi) {
-        lws_callback_on_writable(global_wsi);
-    }
-    
-    pthread_mutex_unlock(&queue_lock);
-}
-
-static int callback_client(
+static int ws_callback(
     struct lws *wsi,
     enum lws_callback_reasons reason,
     void *user,
     void *in,
     size_t len
 ) {
+    WebSocketClient *client = (WebSocketClient *)user;
+
     switch (reason) {
         case LWS_CALLBACK_CLIENT_ESTABLISHED:
-            printf("Connected to server\n");
-            global_wsi = wsi;
+            printf("Connected to %s:%d\n", client->address, client->port);
+            client->wsi = wsi;
             break;
+
         case LWS_CALLBACK_CLIENT_WRITEABLE: {
             pthread_mutex_lock(&queue_lock);
-            
             char *message = dequeue();
             if (message) {
                 unsigned char buffer[512];
@@ -82,74 +73,105 @@ static int callback_client(
                 size_t msg_len = snprintf((char *)p, sizeof(buffer) - LWS_PRE, "%s", message);
                 lws_write(wsi, p, msg_len, LWS_WRITE_TEXT);
                 free(message);
-
-                // If more messages, trigger another writable event
                 if (head) {
-                    lws_callback_on_writable(global_wsi);
+                    lws_callback_on_writable(client->wsi);
                 }
             }
-
             pthread_mutex_unlock(&queue_lock);
             break;
         }
+
         case LWS_CALLBACK_CLIENT_CONNECTION_ERROR:
-        case LWS_CALLBACK_CLIENT_CLOSED:
-            printf("Disconnected from server. Waiting 5 seconds before reconnecting...\n");
-            global_wsi = NULL;
+            printf("Connection error. Attempting to reconnect...\n");
+            sleep(5);
+            client->wsi = NULL;
+            client->wsi = lws_client_connect_via_info(&client->connect_info);
+            break;
 
-            sleep(5);  // Wait for 5 seconds
-
-            while (!global_wsi) {
-                printf("Attempting to reconnect...\n");
-                global_wsi = lws_client_connect_via_info(&connect_info);
-                if (!global_wsi) {
-                    printf("Reconnection failed. Retrying in 5 seconds...\n");
-                    sleep(5);  // Wait for 5 seconds before retrying
-                }
+        case LWS_CALLBACK_CLIENT_RECEIVE:
+            if (client->data_received_callback) {
+                client->data_received_callback((char *)in);
             }
             break;
-        case LWS_CALLBACK_CLIENT_RECEIVE:
-            printf("Received data: %s\n", (char *)in);
-            break;
+
         default:
             break;
     }
+
     return 0;
 }
 
-int main(void) {
-    struct lws_context_creation_info info;
-    memset(&info, 0, sizeof(info));
-
+void *ws_thread(void *arg) {
+    WebSocketClient *client = (WebSocketClient *)arg;
+    struct lws_context_creation_info info = {0};
     info.port = CONTEXT_PORT_NO_LISTEN;
     info.protocols = (const struct lws_protocols[]) {
-        {
-            .name = "example-protocol",
-            .callback = callback_client,
-            .rx_buffer_size = 128
-        },
-        { NULL, NULL, 0 }
+        {"custom-protocol", ws_callback, 0, 128, 0, client},
+        {NULL, NULL, 0}
     };
+
 
     struct lws_context *context = lws_create_context(&info);
     if (!context) {
         printf("Failed to create context\n");
-        return -1;
+        return NULL;
     }
 
-    memset(&connect_info, 0, sizeof(connect_info));  // Update to use memset for initialization
-    connect_info.context = context;
-    connect_info.address = "localhost";
-    connect_info.port = 8082;
-    connect_info.path = "/";
-    connect_info.protocol = "example-protocol";
-    lws_client_connect_via_info(&connect_info);
+    client->connect_info.context = context;
+    client->connect_info.address = client->address;
+    client->connect_info.port = client->port;
+    client->connect_info.path = "/";
+    client->connect_info.protocol = "custom-protocol";
+    client->connect_info.userdata = client;
+    lws_client_connect_via_info(&client->connect_info);
 
     while (1) {
         lws_service(context, 1000);
-        send_to_ws("TEST MESSAGE");
     }
 
     lws_context_destroy(context);
+    return NULL;
+}
+
+WebSocketClient *initialize_ws(const char *address, int port, void (*callback)(const char*)) {
+    WebSocketClient *client = (WebSocketClient *)malloc(sizeof(WebSocketClient));
+    if (!client) {
+        return NULL;
+    }
+
+    client->address = strdup(address);
+    client->port = port;
+    client->data_received_callback = callback;
+
+    pthread_t ws_thread_id;
+    pthread_create(&ws_thread_id, NULL, ws_thread, client);
+
+    return client;
+}
+
+void send_message(WebSocketClient *client, const char *message) {
+    send_to_ws(client, message);
+}
+
+void send_to_ws(WebSocketClient *client, const char *message) {
+    pthread_mutex_lock(&queue_lock);
+    enqueue(message);
+    if (client->wsi) {
+        lws_callback_on_writable(client->wsi);
+    }
+    pthread_mutex_unlock(&queue_lock);
+}
+
+// Example usage
+void data_received(const char *data) {
+    printf("Data received: %s\n", data);
+}
+
+int main(void) {
+    WebSocketClient *client = initialize_ws("localhost", 8083, data_received);
+    sleep(5);
+    send_message(client, "Hello, World!");
+    sleep(5);
+    free(client);
     return 0;
 }
