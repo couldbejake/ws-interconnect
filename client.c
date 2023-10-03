@@ -3,8 +3,10 @@
 #include <libwebsockets.h>
 #include <pthread.h>
 #include <stdlib.h>
+#include <unistd.h>  // for sleep on Unix-like systems
 
-static struct lws *global_wsi = NULL; 
+static struct lws *global_wsi = NULL;
+static struct lws_client_connect_info connect_info;
 
 // Basic linked list structure for message queue
 typedef struct node {
@@ -90,6 +92,22 @@ static int callback_client(
             pthread_mutex_unlock(&queue_lock);
             break;
         }
+        case LWS_CALLBACK_CLIENT_CONNECTION_ERROR:
+        case LWS_CALLBACK_CLIENT_CLOSED:
+            printf("Disconnected from server. Waiting 5 seconds before reconnecting...\n");
+            global_wsi = NULL;
+
+            sleep(5);  // Wait for 5 seconds
+
+            while (!global_wsi) {
+                printf("Attempting to reconnect...\n");
+                global_wsi = lws_client_connect_via_info(&connect_info);
+                if (!global_wsi) {
+                    printf("Reconnection failed. Retrying in 5 seconds...\n");
+                    sleep(5);  // Wait for 5 seconds before retrying
+                }
+            }
+            break;
         case LWS_CALLBACK_CLIENT_RECEIVE:
             printf("Received data: %s\n", (char *)in);
             break;
@@ -98,7 +116,6 @@ static int callback_client(
     }
     return 0;
 }
-
 
 int main(void) {
     struct lws_context_creation_info info;
@@ -120,23 +137,18 @@ int main(void) {
         return -1;
     }
 
-    struct lws_client_connect_info connect_info = {0};
+    memset(&connect_info, 0, sizeof(connect_info));  // Update to use memset for initialization
     connect_info.context = context;
     connect_info.address = "localhost";
-    connect_info.port = 8080;
+    connect_info.port = 8082;
     connect_info.path = "/";
     connect_info.protocol = "example-protocol";
     lws_client_connect_via_info(&connect_info);
 
-
-
     while (1) {
         lws_service(context, 1000);
-    send_to_ws("TEST MESSAGE");
-
+        send_to_ws("TEST MESSAGE");
     }
-
-
 
     lws_context_destroy(context);
     return 0;
