@@ -1,19 +1,11 @@
+#include "ws_client.h"
 #include <stdio.h>
 #include <string.h>
-#include <libwebsockets.h>
 #include <pthread.h>
 #include <stdlib.h>
 #include <unistd.h>
 
 static pthread_mutex_t queue_lock = PTHREAD_MUTEX_INITIALIZER;
-
-typedef struct {
-    char *address;
-    int port;
-    struct lws *wsi;
-    struct lws_client_connect_info connect_info;
-    void (*data_received_callback)(const char*);
-} WebSocketClient;
 
 void send_to_ws(WebSocketClient *client, const char *message);
 
@@ -160,18 +152,4 @@ void send_to_ws(WebSocketClient *client, const char *message) {
         lws_callback_on_writable(client->wsi);
     }
     pthread_mutex_unlock(&queue_lock);
-}
-
-// Example usage
-void data_received(const char *data) {
-    printf("Data received: %s\n", data);
-}
-
-int main(void) {
-    WebSocketClient *client = initialize_ws("localhost", 8083, data_received);
-    sleep(5);
-    send_message(client, "Hello, World!");
-    sleep(5);
-    free(client);
-    return 0;
 }

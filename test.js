@@ -16,6 +16,6 @@ wss.on('connection', (ws) => {
     ws.send('Hello from JavaScript!');
 });
 
-server.listen(8080, () => {
-    console.log('Server started on http://localhost:8080');
+server.listen(8083, () => {
+    console.log('Server started on http://localhost:8083');
 });
