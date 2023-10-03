@@ -1,5 +1,62 @@
 #include <stdio.h>
+#include <string.h>
 #include <libwebsockets.h>
+#include <pthread.h>
+#include <stdlib.h>
+
+static struct lws *global_wsi = NULL; 
+
+// Basic linked list structure for message queue
+typedef struct node {
+    char *message;
+    struct node *next;
+} node_t;
+
+static node_t *head = NULL;
+static node_t *tail = NULL;
+
+static pthread_mutex_t queue_lock = PTHREAD_MUTEX_INITIALIZER;
+
+void enqueue(const char *message) {
+    node_t *new_node = malloc(sizeof(node_t));
+    if (new_node) {
+        new_node->message = strdup(message);
+        new_node->next = NULL;
+
+        if (tail == NULL) {
+            head = new_node;
+            tail = new_node;
+        } else {
+            tail->next = new_node;
+            tail = new_node;
+        }
+    }
+}
+
+char *dequeue() {
+    if (head == NULL) {
+        return NULL;
+    }
+    node_t *old_head = head;
+    char *message = old_head->message;
+    head = head->next;
+    if (head == NULL) {
+        tail = NULL;
+    }
+    free(old_head);
+    return message;
+}
+
+void send_to_ws(const char *message) {
+    pthread_mutex_lock(&queue_lock);
+    
+    enqueue(message);
+    if (global_wsi) {
+        lws_callback_on_writable(global_wsi);
+    }
+    
+    pthread_mutex_unlock(&queue_lock);
+}
 
 static int callback_client(
     struct lws *wsi,
@@ -11,13 +68,26 @@ static int callback_client(
     switch (reason) {
         case LWS_CALLBACK_CLIENT_ESTABLISHED:
             printf("Connected to server\n");
-            lws_callback_on_writable(wsi);
+            global_wsi = wsi;
             break;
         case LWS_CALLBACK_CLIENT_WRITEABLE: {
-            unsigned char msg[512];
-            unsigned char *p = &msg[LWS_PRE];
-            size_t msg_len = sprintf((char *)p, "Hello from C!");
-            lws_write(wsi, p, msg_len, LWS_WRITE_TEXT);
+            pthread_mutex_lock(&queue_lock);
+            
+            char *message = dequeue();
+            if (message) {
+                unsigned char buffer[512];
+                unsigned char *p = &buffer[LWS_PRE];
+                size_t msg_len = snprintf((char *)p, sizeof(buffer) - LWS_PRE, "%s", message);
+                lws_write(wsi, p, msg_len, LWS_WRITE_TEXT);
+                free(message);
+
+                // If more messages, trigger another writable event
+                if (head) {
+                    lws_callback_on_writable(global_wsi);
+                }
+            }
+
+            pthread_mutex_unlock(&queue_lock);
             break;
         }
         case LWS_CALLBACK_CLIENT_RECEIVE:
@@ -28,6 +98,7 @@ static int callback_client(
     }
     return 0;
 }
+
 
 int main(void) {
     struct lws_context_creation_info info;
@@ -57,9 +128,15 @@ int main(void) {
     connect_info.protocol = "example-protocol";
     lws_client_connect_via_info(&connect_info);
 
+
+
     while (1) {
         lws_service(context, 1000);
+    send_to_ws("TEST MESSAGE");
+
     }
+
+
 
     lws_context_destroy(context);
     return 0;
