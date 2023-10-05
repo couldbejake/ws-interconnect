@@ -6,12 +6,12 @@ void on_data_received(const char *data) {
 }
 
 int main() {
-    if (initialize_websocket_client("localhost", 9013) != 0) {
+    if (ws_init_client("localhost", 9014) != 0) {
         printf("Failed to initialize websocket client.\n");
         return -1;
     }
 
-    set_data_received_callback(on_data_received);
+    ws_set_callback(on_data_received);
 
     char message[256];
     while (1) {
@@ -20,9 +20,9 @@ int main() {
         if (strncmp(message, "exit", 4) == 0) {
             break;
         }
-        send_message(message);
+        ws_send(message);
     }
 
-    cleanup_websocket_client();
+    ws_cleanup();
     return 0;
 }
