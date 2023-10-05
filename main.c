@@ -1,16 +1,28 @@
-#include "ws_client.h"
+#include "websocket_client.h"
 #include <stdio.h>
-#include <unistd.h>
 
-void data_received(const char *data) {
-    printf("Data received: %s\n", data);
+void on_data_received(const char *data) {
+    printf("Received data: %s\n", data);
 }
 
-int main(void) {
-    WebSocketClient *client = initialize_ws("localhost", 8083, data_received);
-    sleep(5);
-    send_message(client, "Hello, World!");
-    sleep(5);
-    free(client);
+int main() {
+    if (initialize_websocket_client("localhost", 9013) != 0) {
+        printf("Failed to initialize websocket client.\n");
+        return -1;
+    }
+
+    set_data_received_callback(on_data_received);
+
+    char message[256];
+    while (1) {
+        printf("Enter message to send (or 'exit' to quit): ");
+        fgets(message, sizeof(message), stdin);
+        if (strncmp(message, "exit", 4) == 0) {
+            break;
+        }
+        send_message(message);
+    }
+
+    cleanup_websocket_client();
     return 0;
 }

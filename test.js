@@ -13,9 +13,18 @@ wss.on('connection', (ws) => {
         console.log(`Received message: ${message}`);
     });
 
+    ws.on('error', (err) => {
+        console.log(err)
+    })
+
     ws.send('Hello from JavaScript!');
 });
 
-server.listen(8083, () => {
-    console.log('Server started on http://localhost:8083');
+server.listen(9013, () => {
+    console.log('Server started on http://localhost:9013');
 });
+
+
+server.on('error', (err) => {
+    console.log(err)
+})
