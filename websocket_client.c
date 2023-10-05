@@ -22,6 +22,11 @@ static Node *head = NULL; // Head of the message queue
 static Node *tail = NULL; // Tail of the message queue
 static pthread_mutex_t message_queue_mutex = PTHREAD_MUTEX_INITIALIZER; // Mutex for thread-safe access to the message queue
 
+// Add these global variables
+static pthread_cond_t message_ready_cond = PTHREAD_COND_INITIALIZER;
+static pthread_mutex_t message_ready_mutex = PTHREAD_MUTEX_INITIALIZER;
+
+
 static int callback_websockets(struct lws *wsi, enum lws_callback_reasons reason, void *user, void *in, size_t len) {
     switch (reason) {
         case LWS_CALLBACK_CLIENT_ESTABLISHED:
@@ -78,12 +83,28 @@ void reconnect_ws_client() {
 }
 void* websocket_thread(void *data) {
     while (1) {
+
         if (reconnect_flag) {
             reconnect_ws_client();
             reconnect_flag = 0;
             sleep(2);
         }
-        lws_service(context, 1000);
+        lws_service(context, 1);
+    }
+    return NULL;
+}
+
+void* send_messages_thread(void *data) {
+    while (1) {
+        pthread_mutex_lock(&message_ready_mutex);
+        while (!head) { // Wait until there's a message in the queue
+            pthread_cond_wait(&message_ready_cond, &message_ready_mutex);
+        }
+        pthread_mutex_unlock(&message_ready_mutex);
+
+        if (wsi) {
+            lws_callback_on_writable(wsi);
+        }
     }
     return NULL;
 }
@@ -121,9 +142,14 @@ int ws_init_client(const char *server_address, int port) {
     pthread_create(&ws_thread, NULL, websocket_thread, NULL);
     pthread_detach(ws_thread);
 
+    pthread_t send_thread;
+    pthread_create(&send_thread, NULL, send_messages_thread, NULL);
+    pthread_detach(send_thread);
+
     return 0;
 }
 
+// Modify the ws_send function
 int ws_send(const char *message) {
     pthread_mutex_lock(&message_queue_mutex);
     Node *newNode = (Node *)malloc(sizeof(Node));
@@ -138,7 +164,12 @@ int ws_send(const char *message) {
         tail = newNode;
     }
     pthread_mutex_unlock(&message_queue_mutex);
-    lws_callback_on_writable(wsi);
+
+    // Signal that a message is ready to be sent
+    pthread_mutex_lock(&message_ready_mutex);
+    pthread_cond_signal(&message_ready_cond);
+    pthread_mutex_unlock(&message_ready_mutex);
+
     return 0;
 }
 
