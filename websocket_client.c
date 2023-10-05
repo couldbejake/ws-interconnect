@@ -1,11 +1,26 @@
 #include "websocket_client.h"
 #include <string.h>
 #include <pthread.h>
+#include <stdlib.h>
 
 static struct lws_context *context = NULL;
 static struct lws *wsi = NULL;
 static data_received_callback received_callback = NULL;
-static char message_buffer[256] = {0}; // Buffer to store message to be sent
+static const char *server_address_global;
+static int port_global;
+static int reconnect_flag = 0;
+
+// Define a linked list node for the message queue
+typedef struct Node {
+    char *message;
+    struct Node *next;
+} Node;
+
+struct lws_client_connect_info ccinfo = {0};
+
+static Node *head = NULL; // Head of the message queue
+static Node *tail = NULL; // Tail of the message queue
+static pthread_mutex_t message_queue_mutex = PTHREAD_MUTEX_INITIALIZER; // Mutex for thread-safe access to the message queue
 
 static int callback_websockets(struct lws *wsi, enum lws_callback_reasons reason, void *user, void *in, size_t len) {
     switch (reason) {
@@ -18,18 +33,27 @@ static int callback_websockets(struct lws *wsi, enum lws_callback_reasons reason
             }
             break;
         case LWS_CALLBACK_CLIENT_WRITEABLE:
-            if (strlen(message_buffer) > 0) {
-                unsigned char buf[LWS_SEND_BUFFER_PRE_PADDING + strlen(message_buffer) + LWS_SEND_BUFFER_POST_PADDING];
+            pthread_mutex_lock(&message_queue_mutex);
+            if (head) {
+                Node *temp = head;
+                unsigned char buf[LWS_SEND_BUFFER_PRE_PADDING + strlen(temp->message) + LWS_SEND_BUFFER_POST_PADDING];
                 unsigned char *p = &buf[LWS_SEND_BUFFER_PRE_PADDING];
-                size_t n = strlen(message_buffer);
 
-                memcpy(p, message_buffer, n);
-                lws_write(wsi, p, n, LWS_WRITE_TEXT);
-                memset(message_buffer, 0, sizeof(message_buffer)); // Clear the buffer after sending
+                memcpy(p, temp->message, strlen(temp->message));
+                lws_write(wsi, p, strlen(temp->message), LWS_WRITE_TEXT);
+
+                // Move to the next message and free the current one
+                head = head->next;
+                free(temp->message);
+                free(temp);
             }
+            pthread_mutex_unlock(&message_queue_mutex);
             break;
         case LWS_CALLBACK_CLIENT_CONNECTION_ERROR:
-            printf("Connection error.\n");
+        case LWS_CALLBACK_CLIENT_CLOSED:
+            printf("Connection lost. Attempting to reconnect...\n");
+            wsi = NULL;
+            reconnect_flag = 1;
             break;
         default:
             break;
@@ -47,12 +71,26 @@ static struct lws_protocols protocols[] = {
     { NULL, NULL, 0, 0 }
 };
 
+void reconnect_ws_client() {
+    if (wsi) {
+        lws_client_connect_via_info(&ccinfo);
+    }
+}
 void* websocket_thread(void *data) {
-    while (lws_service(context, 1000) >= 0); // wait 1 second between checks
+    while (1) {
+        if (reconnect_flag) {
+            reconnect_ws_client();
+            reconnect_flag = 0;
+            sleep(2);
+        }
+        lws_service(context, 1000);
+    }
     return NULL;
 }
 
-int initialize_websocket_client(const char *server_address, int port) {
+int ws_init_client(const char *server_address, int port) {
+    server_address_global = server_address;
+    port_global = port;
     struct lws_context_creation_info info;
     memset(&info, 0, sizeof(info));
 
@@ -66,7 +104,6 @@ int initialize_websocket_client(const char *server_address, int port) {
         return -1;
     }
 
-    struct lws_client_connect_info ccinfo = {0};
     ccinfo.context = context;
     ccinfo.address = server_address;
     ccinfo.port = port;
@@ -87,16 +124,37 @@ int initialize_websocket_client(const char *server_address, int port) {
     return 0;
 }
 
-int send_message(const char *message) {
-    strncpy(message_buffer, message, sizeof(message_buffer) - 1);
+int ws_send(const char *message) {
+    pthread_mutex_lock(&message_queue_mutex);
+    Node *newNode = (Node *)malloc(sizeof(Node));
+    newNode->message = strdup(message);
+    newNode->next = NULL;
+
+    if (!head) {
+        head = newNode;
+        tail = newNode;
+    } else {
+        tail->next = newNode;
+        tail = newNode;
+    }
+    pthread_mutex_unlock(&message_queue_mutex);
     lws_callback_on_writable(wsi);
     return 0;
 }
 
-void set_data_received_callback(data_received_callback callback) {
+void ws_set_callback(data_received_callback callback) {
     received_callback = callback;
 }
 
-void cleanup_websocket_client() {
+void ws_cleanup() {
     lws_context_destroy(context);
+    pthread_mutex_destroy(&message_queue_mutex);
+
+    // Cleanup the message queue
+    while (head) {
+        Node *temp = head;
+        head = head->next;
+        free(temp->message);
+        free(temp);
+    }
 }
