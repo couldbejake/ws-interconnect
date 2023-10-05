@@ -6,15 +6,15 @@
 typedef void (*data_received_callback)(const char *data);
 
 // Initialize the web socket client
-int initialize_websocket_client(const char *server_address, int port);
+int ws_init_client(const char *server_address, int port);
 
 // Send a message over the web socket
-int send_message(const char *message);
+int ws_send(const char *message);
 
 // Set the callback function to be called when new data is received
-void set_data_received_callback(data_received_callback callback);
+void ws_set_callback(data_received_callback callback);
 
 // Cleanup and close the websocket client
-void cleanup_websocket_client();
+void ws_cleanup();
 
 #endif // WEBSOCKET_CLIENT_H
